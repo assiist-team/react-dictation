@@ -1,5 +1,18 @@
 import React from 'react';
 import { render, waitFor, act, renderHook, waitFor as waitForHook } from '@testing-library/react-native';
+
+// Mock react-native-svg before importing src to avoid React Native API dependencies
+jest.mock('react-native-svg', () => ({
+  Svg: 'Svg',
+  Rect: 'Rect',
+  Circle: 'Circle',
+  Path: 'Path',
+  G: 'G',
+  Defs: 'Defs',
+  LinearGradient: 'LinearGradient',
+  Stop: 'Stop',
+}));
+
 import { useDictation, useWaveform } from '../../src';
 
 // Mock native modules
@@ -8,10 +21,26 @@ const mockEmit = (event: string, data: any) => {
   mockListeners[event]?.forEach(cb => cb(data));
 };
 
+// Mock react-native without requiring actual module to avoid Babel Flow parsing issues
 jest.mock('react-native', () => {
-  const actualRN = jest.requireActual('react-native');
+  const mockEmitterInstance = {
+    addListener: jest.fn((event: string, callback: (event: any) => void) => {
+      if (!mockListeners[event]) {
+        mockListeners[event] = [];
+      }
+      mockListeners[event].push(callback);
+      return {
+        remove: jest.fn(() => {
+          const index = mockListeners[event]?.indexOf(callback);
+          if (index !== undefined && index >= 0) {
+            mockListeners[event].splice(index, 1);
+          }
+        }),
+      };
+    }),
+  };
+
   return {
-    ...actualRN,
     NativeModules: {
       DictationModule: {
         initialize: jest.fn().mockResolvedValue(undefined),
@@ -19,27 +48,78 @@ jest.mock('react-native', () => {
         stopListening: jest.fn().mockResolvedValue(undefined),
         cancelListening: jest.fn().mockResolvedValue(undefined),
         getAudioLevel: jest.fn().mockResolvedValue(0.5),
+        normalizeAudio: jest.fn().mockResolvedValue({
+          canonicalPath: '/path/to/normalized.m4a',
+          durationMs: 5000,
+          sizeBytes: 40000,
+          wasReencoded: false,
+        }),
       },
     },
-    NativeEventEmitter: jest.fn().mockImplementation(() => {
+    NativeEventEmitter: jest.fn().mockImplementation(() => mockEmitterInstance),
+    Platform: { 
+      OS: 'ios',
+      select: jest.fn((obj) => obj.ios || obj.default),
+      Version: 17,
+    },
+    processColor: jest.fn((color) => color),
+    StyleSheet: {
+      create: jest.fn((styles) => styles),
+      flatten: jest.fn(),
+      hairlineWidth: 0.5,
+    },
+    View: (props: any) => React.createElement('View', props),
+    Text: (props: any) => React.createElement('Text', props),
+    ScrollView: (props: any) => React.createElement('ScrollView', props),
+    Touchable: {
+      Mixin: {
+        touchableHandleStartShouldSetResponder: jest.fn(),
+        touchableHandleResponderTerminationRequest: jest.fn(),
+        touchableHandleResponderGrant: jest.fn(),
+        touchableHandleResponderMove: jest.fn(),
+        touchableHandleResponderRelease: jest.fn(),
+        touchableHandleResponderTerminate: jest.fn(),
+      },
+    },
+    TouchableOpacity: 'TouchableOpacity',
+    TouchableHighlight: 'TouchableHighlight',
+    TouchableWithoutFeedback: 'TouchableWithoutFeedback',
+    TextInput: 'TextInput',
+    Image: 'Image',
+  };
+});
+
+// Mock NativeDictationModule
+jest.mock('../../src/NativeDictationModule', () => {
+  const mockEmitterInstance = {
+    addListener: jest.fn((event: string, callback: (event: any) => void) => {
+      if (!mockListeners[event]) {
+        mockListeners[event] = [];
+      }
+      mockListeners[event].push(callback);
       return {
-        addListener: jest.fn((event: string, callback: (event: any) => void) => {
-          if (!mockListeners[event]) {
-            mockListeners[event] = [];
+        remove: jest.fn(() => {
+          const index = mockListeners[event]?.indexOf(callback);
+          if (index !== undefined && index >= 0) {
+            mockListeners[event].splice(index, 1);
           }
-          mockListeners[event].push(callback);
-          return {
-            remove: jest.fn(() => {
-              const index = mockListeners[event]?.indexOf(callback);
-              if (index !== undefined && index >= 0) {
-                mockListeners[event].splice(index, 1);
-              }
-            }),
-          };
         }),
       };
     }),
-    Platform: { OS: 'ios' },
+  };
+
+  const { NativeModules } = require('react-native');
+  
+  return {
+    DictationEventEmitter: mockEmitterInstance,
+    NativeDictationModule: NativeModules.DictationModule,
+    DictationEvents: {
+      onResult: 'onResult',
+      onStatus: 'onStatus',
+      onAudioLevel: 'onAudioLevel',
+      onAudioFile: 'onAudioFile',
+      onError: 'onError',
+    },
   };
 });
 
@@ -83,13 +163,20 @@ describe('Dictation Integration', () => {
   it('should initialize and be ready', async () => {
     let initialized = false;
     
-    render(
-      <TestDictationComponent 
-        onInitialized={() => { initialized = true; }} 
-      />
-    );
+    const { result } = renderHook(() => {
+      const dictation = useDictation();
+      
+      React.useEffect(() => {
+        dictation.initialize().then(() => {
+          initialized = true;
+        });
+      }, []);
+
+      return dictation;
+    });
 
     await waitFor(() => expect(initialized).toBe(true), { timeout: 5000 });
+    expect(result.current.isInitialized).toBe(true);
   });
 
   it('should integrate waveform with dictation audio levels', async () => {
@@ -115,12 +202,18 @@ describe('Dictation Integration', () => {
 
     await waitForHook(() => expect(initialized).toBe(true));
 
-    // Simulate audio level update via event emitter
+    // Start listening to set up event listeners
+    await act(async () => {
+      await hookResult.current.dictation.startListening();
+    });
+
+    // Simulate audio level update via event emitter (event structure matches DictationAudioLevel type)
     act(() => {
       mockEmit('onAudioLevel', { level: 0.75 });
     });
 
     await waitForHook(() => {
+      expect(hookResult.current.dictation.audioLevel).toBe(0.75);
       expect(hookResult.current.waveform.currentLevel).toBeGreaterThan(0);
     });
   });
@@ -129,12 +222,21 @@ describe('Dictation Integration', () => {
     const { NativeModules } = require('react-native');
     const onResult = jest.fn();
     
-    render(
-      <TestDictationComponent onResult={onResult} />
-    );
+    const { result } = renderHook(() => {
+      const dictation = useDictation({
+        onFinalResult: onResult,
+      });
+      
+      React.useEffect(() => {
+        dictation.initialize();
+      }, []);
+
+      return dictation;
+    });
 
     await waitFor(() => {
       expect(NativeModules.DictationModule.initialize).toHaveBeenCalled();
+      expect(result.current.isInitialized).toBe(true);
     });
   });
 });

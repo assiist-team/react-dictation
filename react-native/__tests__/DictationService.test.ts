@@ -1,7 +1,14 @@
 import { DictationService } from '../src/DictationService';
 
-// Create mock functions - must be defined before jest.mock() calls
-const createMocks = () => {
+// Initialize global mocks storage before any jest.mock() calls
+// This ensures mocks are available to all mock factories regardless of hoisting order
+if (!(global as any).__dictationMocks__) {
+  (global as any).__dictationMocks__ = {};
+}
+
+// Mock native modules first - define mocks inside factory to avoid hoisting issues
+jest.mock('react-native', () => {
+  // Create mocks inside the factory function
   const mockInitialize = jest.fn();
   const mockStartListening = jest.fn();
   const mockStopListening = jest.fn();
@@ -11,7 +18,8 @@ const createMocks = () => {
   const mockAddListener = jest.fn().mockReturnValue({ remove: jest.fn() });
   const mockEmitter = { addListener: mockAddListener };
   
-  return {
+  // Store references for later access in tests and other mocks
+  (global as any).__dictationMocks__ = {
     mockInitialize,
     mockStartListening,
     mockStopListening,
@@ -21,50 +29,94 @@ const createMocks = () => {
     mockAddListener,
     mockEmitter,
   };
-};
-
-const mocks = createMocks();
-
-// Mock native modules first
-jest.mock('react-native', () => ({
-  NativeModules: {
-    DictationModule: {
-      initialize: mocks.mockInitialize,
-      startListening: mocks.mockStartListening,
-      stopListening: mocks.mockStopListening,
-      cancelListening: mocks.mockCancelListening,
-      getAudioLevel: mocks.mockGetAudioLevel,
-      normalizeAudio: mocks.mockNormalizeAudio,
+  
+  return {
+    NativeModules: {
+      DictationModule: {
+        initialize: mockInitialize,
+        startListening: mockStartListening,
+        stopListening: mockStopListening,
+        cancelListening: mockCancelListening,
+        getAudioLevel: mockGetAudioLevel,
+        normalizeAudio: mockNormalizeAudio,
+      },
     },
-  },
-  NativeEventEmitter: jest.fn().mockImplementation(() => mocks.mockEmitter),
-  Platform: { OS: 'ios' },
-}));
+    NativeEventEmitter: jest.fn().mockImplementation(() => mockEmitter),
+    Platform: { OS: 'ios' },
+  };
+});
 
 // Mock the NativeDictationModule to use the same mocks
-jest.mock('../src/NativeDictationModule', () => ({
-  DictationEventEmitter: mocks.mockEmitter,
-  NativeDictationModule: {
-    initialize: mocks.mockInitialize,
-    startListening: mocks.mockStartListening,
-    stopListening: mocks.mockStopListening,
-    cancelListening: mocks.mockCancelListening,
-    getAudioLevel: mocks.mockGetAudioLevel,
-    normalizeAudio: mocks.mockNormalizeAudio,
-  },
-  DictationEvents: {
-    onResult: 'onResult',
-    onStatus: 'onStatus',
-    onAudioLevel: 'onAudioLevel',
-    onAudioFile: 'onAudioFile',
-    onError: 'onError',
-  },
-}));
+jest.mock('../src/NativeDictationModule', () => {
+  // Get or create mocks from global storage
+  let storedMocks = (global as any).__dictationMocks__;
+  
+  // If mocks haven't been created yet (can happen due to hoisting order),
+  // create them here as well
+  if (!storedMocks || !storedMocks.mockEmitter) {
+    const mockInitialize = jest.fn();
+    const mockStartListening = jest.fn();
+    const mockStopListening = jest.fn();
+    const mockCancelListening = jest.fn();
+    const mockGetAudioLevel = jest.fn();
+    const mockNormalizeAudio = jest.fn();
+    const mockAddListener = jest.fn().mockReturnValue({ remove: jest.fn() });
+    const mockEmitter = { addListener: mockAddListener };
+    
+    storedMocks = {
+      mockInitialize,
+      mockStartListening,
+      mockStopListening,
+      mockCancelListening,
+      mockGetAudioLevel,
+      mockNormalizeAudio,
+      mockAddListener,
+      mockEmitter,
+    };
+    (global as any).__dictationMocks__ = storedMocks;
+  }
+  
+  return {
+    DictationEventEmitter: storedMocks.mockEmitter,
+    NativeDictationModule: {
+      initialize: storedMocks.mockInitialize,
+      startListening: storedMocks.mockStartListening,
+      stopListening: storedMocks.mockStopListening,
+      cancelListening: storedMocks.mockCancelListening,
+      getAudioLevel: storedMocks.mockGetAudioLevel,
+      normalizeAudio: storedMocks.mockNormalizeAudio,
+    },
+    DictationEvents: {
+      onResult: 'onResult',
+      onStatus: 'onStatus',
+      onAudioLevel: 'onAudioLevel',
+      onAudioFile: 'onAudioFile',
+      onError: 'onError',
+    },
+  };
+});
+
+// Store mocks reference for use in tests
+let mocks: {
+  mockInitialize: jest.Mock;
+  mockStartListening: jest.Mock;
+  mockStopListening: jest.Mock;
+  mockCancelListening: jest.Mock;
+  mockGetAudioLevel: jest.Mock;
+  mockNormalizeAudio: jest.Mock;
+  mockAddListener: jest.Mock;
+  mockEmitter: { addListener: jest.Mock };
+};
 
 describe('DictationService', () => {
   let service: DictationService;
 
   beforeEach(() => {
+    // Get mocks from global storage (set up in jest.mock factories)
+    mocks = (global as any).__dictationMocks__;
+    if (!mocks) {
+      throw new Error('Mocks not initialized');
+    }
     jest.clearAllMocks();
     mocks.mockAddListener.mockReturnValue({ remove: jest.fn() });
     service = new DictationService();
